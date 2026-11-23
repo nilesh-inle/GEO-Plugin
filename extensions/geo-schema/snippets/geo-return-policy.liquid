@@ -1,0 +1,13 @@
+{%- comment -%}
+  MerchantReturnPolicy JSON object. Expects `returns` from the GEO settings metafield.
+{%- endcomment -%}
+{
+  "@type": "MerchantReturnPolicy",
+  {%- if returns.days %}
+  "merchantReturnDays": {{ returns.days | json }},
+  "returnMethod": {{ returns.method | json }},
+  "returnFees": {{ returns.fees | json }},
+  {%- endif %}
+  "applicableCountry": {{ returns.countries | json }},
+  "returnPolicyCategory": {{ returns.category | json }}
+}

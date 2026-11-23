@@ -1,0 +1,330 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = "file:dev.sqlite"
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+/// One row per installed shop. JSON columns are stored as strings so the
+/// schema works on SQLite in development and Postgres/MySQL in production.
+model Store {
+  shop              String    @id
+  name              String?
+  url               String?
+  currency          String?
+  country           String?
+  contactEmail      String?
+  description       String?
+  /// JSON: [{ type, title, url }]
+  policies          String    @default("[]")
+  appInstallationId String?
+  productCount      Int       @default(0)
+  collectionCount   Int       @default(0)
+  /// JSON: shipping and returns details used by the schema app embed
+  schemaSettings    String?
+  /// none | applied | manual | failed
+  robotsStatus      String    @default("none")
+  llmsStatus        String    @default("none")
+  schemaStatus      String    @default("none")
+  /// JSON: per-area details (managed crawlers, manual template content, errors)
+  fixState          String    @default("{}")
+  llmsAutoUpdate    Boolean   @default(true)
+  llmsDirty         Boolean   @default(false)
+  llmsUpdatedAt     DateTime?
+  baselineAuditId   String?
+  optimizedAt       DateTime?
+  syncedAt          DateTime?
+  /// Answers requested per prompt, per AI tool, in each tracking run
+  trackAnswers      Int       @default(2)
+  trackNextRunAt    DateTime?
+  /// JSON: domains whose links count as citations. Null uses the store's own domains.
+  trackDomains      String?
+  /// JSON: { shipsTo: [codes], policyTypes: [types], refundWindowDays, passwordEnabled }
+  shopFacts         String    @default("{}")
+  /// JSON: latest AI access checks { reachability: {...}, agents: {...} }
+  accessState       String    @default("{}")
+  /// JSON: automation and notification switches (see app/lib/settings.js)
+  settings          String    @default("{}")
+  /// JSON: [{ name, domain }] competitors watched in AI answers
+  competitors       String    @default("[]")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+/// A sync-and-scan job. Runs in the background; the UI polls this row.
+model SyncRun {
+  id         String    @id @default(cuid())
+  shop       String
+  /// full | verify | retry
+  mode       String    @default("full")
+  /// running | completed | failed
+  status     String    @default("running")
+  /// JSON: { [stepKey]: { status, detail } }
+  steps      String
+  /// JSON: { done, total }
+  progress   String    @default("{}")
+  /// JSON: raw scan results consumed by the audit
+  scan       String    @default("{}")
+  error      String?
+  auditId    String?
+  startedAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  finishedAt DateTime?
+
+  @@index([shop, startedAt])
+}
+
+model Product {
+  id           String   @id
+  shop         String
+  handle       String
+  title        String
+  status       String
+  vendor       String?
+  productType  String?
+  description  String?
+  url          String?
+  imageUrl     String?
+  minPrice     Float?
+  maxPrice     Float?
+  /// JSON: distinct variant prices
+  prices       String   @default("[]")
+  available    Boolean  @default(false)
+  variantCount Int      @default(0)
+  gtinCount    Int      @default(0)
+  /// Shopify Standard Product Taxonomy path, e.g. "Apparel & Accessories > Shoes"
+  category     String?
+  /// Length of the plain-text description (capped at 2000)
+  descriptionChars Int  @default(0)
+  imageCount   Int      @default(0)
+  imagesMissingAlt Int  @default(0)
+  isGiftCard   Boolean  @default(false)
+  ratingValue  Float?
+  ratingCount  Int      @default(0)
+  updatedAt    DateTime
+
+  @@index([shop])
+}
+
+model Collection {
+  id            String   @id
+  shop          String
+  handle        String
+  title         String
+  description   String?
+  productsCount Int      @default(0)
+  updatedAt     DateTime
+
+  @@index([shop])
+}
+
+model Audit {
+  id        String   @id @default(cuid())
+  shop      String
+  runId     String?
+  /// JSON: computed audit (see app/lib/audit.js)
+  data      String
+  issues    Int
+  warnings  Int
+  /// AI readiness score 0-100 when the audit was taken (app/lib/readiness.js)
+  readiness Int?
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
+}
+
+/// An AI tool the merchant connected with their own API key.
+model AiTool {
+  id          String   @id @default(cuid())
+  shop        String
+  /// openai | anthropic | gemini | perplexity
+  provider    String
+  model       String
+  /// Encrypted with AES-256-GCM (app/services/secrets.server.js). Never sent to the browser.
+  apiKey      String
+  /// Last characters of the key, shown so the merchant can tell keys apart
+  keyHint     String
+  /// connected | error
+  status      String   @default("connected")
+  lastError   String?
+  connectedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shop, provider])
+}
+
+/// A shopper question checked against each connected AI tool.
+model TrackPrompt {
+  id        String   @id @default(cuid())
+  shop      String
+  text      String
+  /// category | product | brand | gift | location | custom
+  kind      String   @default("custom")
+  /// What a suggestion is based on (a collection, product or the store)
+  basis     String?
+  selected  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([shop])
+}
+
+/// One tracking job: every selected prompt asked to one or more AI tools.
+model TrackRun {
+  id         String    @id @default(cuid())
+  shop       String
+  /// connect | weekly | manual
+  trigger    String
+  /// JSON: provider ids checked in this run
+  providers  String
+  /// running | completed | failed
+  status     String    @default("running")
+  /// JSON: { stage, done, total }
+  progress   String    @default("{}")
+  error      String?
+  startedAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  finishedAt DateTime?
+
+  @@index([shop, startedAt])
+}
+
+/// One AI answer to one prompt, and whether it cites the store.
+model TrackAnswer {
+  id        String   @id @default(cuid())
+  shop      String
+  runId     String
+  promptId  String
+  provider  String
+  model     String
+  cited     Boolean  @default(false)
+  mentioned Boolean  @default(false)
+  /// JSON: [{ url, title }] sources the answer links to (capped)
+  sources   String   @default("[]")
+  /// Answer text, truncated
+  text      String   @default("")
+  error     String?
+  createdAt DateTime @default(now())
+
+  @@index([shop, createdAt])
+  @@index([promptId, provider])
+}
+
+/// Weekly citation totals per AI tool. Answers are deleted after a few weeks;
+/// these rows keep the trend (up to a year). Rebuilt from answers after each
+/// tracking run.
+model CitationWeek {
+  id          String   @id @default(cuid())
+  shop        String
+  /// Monday 00:00 UTC
+  weekStart   DateTime
+  provider    String
+  answers     Int      @default(0)
+  /// Answers that link to or write out the store's domain
+  cited       Int      @default(0)
+  /// Answers that name or cite the store
+  mentioned   Int      @default(0)
+  /// Page citations: one per store page per answer
+  links       Int      @default(0)
+  /// JSON: { [competitor domain]: answers citing it }
+  competitors String   @default("{}")
+  updatedAt   DateTime @updatedAt
+
+  @@unique([shop, weekStart, provider])
+  @@index([shop, weekStart])
+}
+
+/// Merchant decisions on Fix list issues. Issues themselves are computed from
+/// the latest audit and catalog; this row only remembers dismissals.
+model IssueState {
+  id        String   @id @default(cuid())
+  shop      String
+  /// Issue key from app/lib/issues.js
+  key       String
+  /// open | dismissed
+  status    String   @default("open")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([shop, key])
+}
+
+/// Every change GEO publishes to the store, for Reports and restore.
+model ChangeLog {
+  id         String    @id @default(cuid())
+  shop       String
+  /// robots | llms | schema | products | brand | settings
+  area       String
+  title      String
+  detail     String?
+  items      Int       @default(1)
+  actor      String    @default("GEO")
+  /// published | restored | failed
+  status     String    @default("published")
+  /// JSON snapshot used to restore (theme file content, product fields)
+  before     String?
+  createdAt  DateTime  @default(now())
+  restoredAt DateTime?
+
+  @@index([shop, createdAt])
+}
+
+/// A canonical fact about the brand, published to llms.txt and schema.
+model BrandFact {
+  id        String   @id @default(cuid())
+  shop      String
+  /// identity | policies | products | contact
+  group     String
+  label     String
+  value     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shop])
+}
+
+/// An AI-suggested change to one product field, reviewed before publishing.
+model ProductDraft {
+  id        String   @id @default(cuid())
+  shop      String
+  productId String
+  /// title | description | seoTitle | seoDescription
+  field     String
+  current   String   @default("")
+  suggested String
+  /// draft | accepted | rejected | published | failed
+  status    String   @default("draft")
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shop, productId])
+  @@index([shop, status])
+}

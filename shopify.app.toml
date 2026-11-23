@@ -1,0 +1,75 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "c9afb2710cb494ee28e68284be469692"
+name = "geo"
+application_url = "https://example.com"
+embedded = true
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+# read_products        Sync products and collections for the audit and llms.txt
+# read_legal_policies  Read shipping, refund and privacy policies for llms.txt
+# read_themes          Read robots.txt.liquid / llms.txt.liquid and check the app embed
+# write_themes         Write robots.txt.liquid and llms.txt.liquid
+#                      (public apps need Shopify's approval to edit theme files;
+#                      without it the app falls back to a copy-and-paste step)
+# write_products       Publish reviewed product title, description and SEO drafts
+# read_orders          AI performance: orders whose visit came from an AI assistant
+#                      (also needs protected customer data access in the Partner Dashboard)
+# read_content         Content: blog posts and pages scored for AI answers
+# write_app_proxy      Required by Shopify for the app proxy that serves the IndexNow key file
+# write_online_store_navigation
+#                      One URL redirect so the IndexNow key file is found at the store root
+scopes = "read_products,write_products,read_legal_policies,read_themes,write_themes,read_orders,read_content,write_app_proxy,write_online_store_navigation"
+
+[webhooks]
+api_version = "2026-07"
+
+  # Handled by: /app/routes/webhooks.app.uninstalled.jsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = [ "app/uninstalled" ]
+
+  # Handled by: /app/routes/webhooks.app.scopes_update.jsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/scopes_update"
+  topics = [ "app/scopes_update" ]
+
+  # Keeps synced catalog data and llms.txt current.
+  # Handled by: /app/routes/webhooks.catalog.jsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/catalog"
+  topics = [
+    "products/create",
+    "products/update",
+    "products/delete",
+    "collections/create",
+    "collections/update",
+    "collections/delete",
+  ]
+
+  # Re-writes managed theme templates when the merchant publishes another theme.
+  # Handled by: /app/routes/webhooks.themes.publish.jsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/themes/publish"
+  topics = [ "themes/publish" ]
+
+  # Mandatory compliance topics for public apps.
+  # Handled by: /app/routes/webhooks.compliance.jsx
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/compliance"
+  compliance_topics = [ "customers/data_request", "customers/redact", "shop/redact" ]
+
+# Serves the IndexNow key file on the store's domain: /apps/geo/indexnow/<key>.txt
+# Handled by: /app/routes/proxy.indexnow.$file.jsx
+[app_proxy]
+url = "https://example.com/proxy"
+subpath = "geo"
+prefix = "apps"
+
+[auth]
+redirect_urls = [ "https://example.com/api/auth" ]
+
+[build]
+include_config_on_deploy = true
+automatically_update_urls_on_dev = true

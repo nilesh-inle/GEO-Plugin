@@ -1,0 +1,44 @@
+{%- comment -%}
+  GEO structured data (app embed).
+  Settings come from the app-data metafield app.metafields.geo.schema, written by the app.
+  Every value is rendered from live store data, so prices and stock are always current.
+{%- endcomment -%}
+{%- liquid
+  assign geo = app.metafields.geo.schema.value
+  if geo and geo.enabled
+    if request.page_type == 'product' and product and geo.product
+      render 'geo-product-schema', product: product, geo: geo
+    elsif request.page_type == 'index' and geo.organization
+      render 'geo-organization-schema', geo: geo
+    endif
+  endif
+
+  comment
+    Snippet rules: how much of a page AI answers in search may quote.
+    Values are limited by the app to nosnippet or max-snippet:N.
+  endcomment
+  if geo and geo.snippets
+    assign snippet_rule = nil
+    case request.page_type
+      when 'product'
+        assign snippet_rule = geo.snippets.product
+      when 'collection'
+        assign snippet_rule = geo.snippets.collection
+      when 'article', 'blog'
+        assign snippet_rule = geo.snippets.article
+      when 'page', 'policy'
+        assign snippet_rule = geo.snippets.page
+    endcase
+    if snippet_rule != blank
+      echo '<meta name="robots" content="' | append: snippet_rule | append: '">'
+    endif
+  endif
+-%}
+
+{% schema %}
+{
+  "name": "GEO structured data",
+  "target": "head",
+  "settings": []
+}
+{% endschema %}

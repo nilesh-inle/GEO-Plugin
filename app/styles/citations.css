@@ -1,0 +1,103 @@
+
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  /* The accent colour of every screen here; change these four to re-theme. */
+  --color-brand-50: #eef4fe;
+  --color-brand-100: #d9e7fd;
+  --color-brand: #1f6feb;
+  --color-brand-700: #1556bd;
+}
+
+@layer base {
+  .geo-ui,
+  .geo-ui *,
+  .geo-ui *::before,
+  .geo-ui *::after {
+    box-sizing: border-box;
+  }
+
+  .geo-ui {
+    font-family:
+      Inter, -apple-system, BlinkMacSystemFont, "San Francisco", "Segoe UI",
+      Roboto, "Helvetica Neue", sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    color: #1f2937;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .geo-ui h2,
+  .geo-ui h3,
+  .geo-ui p,
+  .geo-ui ul {
+    margin: 0;
+  }
+
+  .geo-ui ul {
+    padding: 0;
+    list-style: none;
+  }
+
+  .geo-ui button,
+  .geo-ui input,
+  .geo-ui select,
+  .geo-ui textarea {
+    font: inherit;
+    color: inherit;
+    margin: 0;
+  }
+
+  .geo-ui button {
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+    text-align: inherit;
+  }
+
+  .geo-ui button:disabled {
+    cursor: not-allowed;
+  }
+
+  .geo-ui table {
+    border-collapse: collapse;
+    border-spacing: 0;
+  }
+
+  .geo-ui th {
+    font-weight: 500;
+  }
+
+  .geo-ui a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .geo-ui :focus-visible {
+    outline: 2px solid var(--color-brand);
+    outline-offset: 1px;
+  }
+}
+
+@keyframes geo-slide-in {
+  from {
+    transform: translateX(32px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes geo-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
