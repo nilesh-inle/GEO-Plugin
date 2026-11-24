@@ -4,10 +4,11 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { readBody, requireStore } from "../services/guard.server";
 import { getEngineOptions, getPromptCitations } from "../services/citations.server";
 import {
-  addPrompt,
+  addPrompts,
   getLatestTrackRun,
   getTrackOverview,
   startTrackRun,
+  suggestPrompts,
 } from "../services/tracking.server";
 import { AddPromptPanel } from "../components/AddPromptPanel";
 import { Icon } from "../components/CitationUi";
@@ -18,12 +19,13 @@ import { VisibilityInsights } from "../components/VisibilityInsights";
 import { PeriodBar, SummaryCards } from "../components/VisibilitySummary";
 import { downloadCsv } from "../components/ui";
 import { usePolling } from "../hooks/usePolling";
+import { storeDomains, tracksOtherSite } from "../lib/citations";
 import { parseEngines, parseRange, rangeParams } from "../lib/citationView";
 import { RUN_STATUS, TRACK, TRACK_TRIGGER } from "../lib/constants";
 import "../styles/citations.css";
 
 export const loader = async ({ request }) => {
-  const { shop } = await requireStore(request);
+  const { shop, store } = await requireStore(request);
   const url = new URL(request.url);
   const range = parseRange(url.searchParams);
   const engines = parseEngines(url.searchParams.get("tools"));
@@ -33,26 +35,64 @@ export const loader = async ({ request }) => {
     getEngineOptions(shop),
     getTrackOverview(shop),
   ]);
-  return { table, engineOptions, overview, range, engines, maxPrompts: TRACK.maxPrompts };
+  // What AI-written prompts are based on: the catalog for the store's own
+  // domains, the home page for another website set as the Store URL.
+  const promptSource = {
+    domains: overview.domains,
+    basedOn: tracksOtherSite(overview.domains, storeDomains(store, shop)) ? "website" : "catalog",
+  };
+  return {
+    table,
+    engineOptions,
+    overview,
+    promptSource,
+    range,
+    engines,
+    maxPrompts: TRACK.maxPrompts,
+  };
 };
 
+// Writing suggestions saves nothing, so the page's data needn't reload.
+export const shouldRevalidate = ({ json, defaultShouldRevalidate }) =>
+  json?.intent === "suggest" ? false : defaultShouldRevalidate;
+
 /**
- * Adds a prompt from the "Add new prompt" panel. With `runNow` the new prompt
- * is asked right away, to the chosen engines only; the weekly check of the
- * other prompts isn't affected.
+ * The "Add new prompt" panel:
+ *   suggest  a connected AI tool writes prompts for the tracked domains; nothing is saved
+ *   add      saves the merchant's prompt and the suggestions they picked. With
+ *            `runNow` the tracked ones are asked right away, to the chosen
+ *            engines only; the weekly check of the other prompts isn't affected.
  */
 export const action = async ({ request }) => {
   const { shop } = await requireStore(request);
   const body = await readBody(request);
+  if (body.intent === "suggest") {
+    try {
+      return { ok: true, ...(await suggestPrompts(shop)) };
+    } catch (error) {
+      return { error: error.message };
+    }
+  }
   if (body.intent !== "add") return { error: "Unknown action." };
 
-  let prompt;
+  const picked = Array.isArray(body.suggestions)
+    ? body.suggestions.slice(0, TRACK.suggestions)
+    : [];
+  const items = [
+    ...(String(body.text ?? "").trim() ? [{ text: body.text }] : []),
+    ...picked.map((item) => ({ text: item?.text, kind: item?.kind, basis: item?.basis })),
+  ];
+  if (!items.length) return { error: "Write a prompt or pick one AI wrote." };
+
+  let prompts;
   try {
-    prompt = await addPrompt(shop, body.text);
+    prompts = await addPrompts(shop, items);
   } catch (error) {
     return { error: error.message };
   }
-  if (!body.runNow || !prompt.selected) return { ok: true, started: false };
+  const added = prompts.length;
+  const tracked = prompts.filter((prompt) => prompt.selected).map((prompt) => prompt.id);
+  if (!body.runNow || !tracked.length) return { ok: true, added, started: false };
 
   const connected = (await getEngineOptions(shop))
     .filter((option) => option.connected)
@@ -60,22 +100,22 @@ export const action = async ({ request }) => {
   const providers = parseEngines(
     Array.isArray(body.engines) ? body.engines.join(",") : "",
   ).filter((id) => connected.includes(id));
-  if (!providers.length) return { ok: true, started: false };
+  if (!providers.length) return { ok: true, added, started: false };
 
   // A check can't start while another one runs.
   const latest = await getLatestTrackRun(shop);
   if (latest?.status === RUN_STATUS.RUNNING)
-    return { ok: true, started: false, note: "A check is running, so it joins the next one." };
+    return { ok: true, added, started: false, note: "A check is running, so they join the next one." };
 
   try {
     await startTrackRun(shop, {
       trigger: TRACK_TRIGGER.MANUAL,
-      promptIds: [prompt.id],
+      promptIds: tracked,
       providers,
     });
-    return { ok: true, started: true };
+    return { ok: true, added, started: true };
   } catch (error) {
-    return { ok: true, started: false, note: error.message };
+    return { ok: true, added, started: false, note: error.message };
   }
 };
 
@@ -108,7 +148,8 @@ const SCOPES = [
 ];
 
 export default function AiVisibility() {
-  const { table, engineOptions, overview, range, engines, maxPrompts } = useLoaderData();
+  const { table, engineOptions, overview, promptSource, range, engines, maxPrompts } =
+    useLoaderData();
   const navigate = useNavigate();
   const navigation = useNavigation();
   const loading = navigation.state === "loading";
@@ -236,6 +277,7 @@ export default function AiVisibility() {
           running={running}
           selectedPrompts={table.selectedPrompts}
           maxPrompts={maxPrompts}
+          promptSource={promptSource}
           onClose={closeAdd}
         />
       )}

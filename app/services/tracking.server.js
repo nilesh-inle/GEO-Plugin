@@ -24,6 +24,7 @@ import {
   tracksOtherSite,
 } from "../lib/citations";
 import {
+  PROMPT_KINDS,
   RUN_STATUS,
   TOOL_STATUS,
   TRACK,
@@ -303,24 +304,48 @@ export function listPrompts(shop) {
   });
 }
 
-export async function addPrompt(shop, input) {
-  const text = cleanPromptText(input);
-  if (text.length < 8)
-    throw new Error("Write a question of at least 8 characters.");
+/**
+ * Adds prompts, all or none: the merchant's own (kind "custom") or ones an AI
+ * tool wrote, which keep their kind and basis. Each is tracked while fewer
+ * than TRACK.maxPrompts are, and archived after that.
+ * @param {Array<{ text: string, kind?: string, basis?: string | null }>} items
+ * @returns {Promise<Array<object>>} the new TrackPrompt rows, in order
+ */
+export async function addPrompts(shop, items) {
   const existing = await prisma.trackPrompt.findMany({ where: { shop } });
-  if (
-    existing.some((prompt) => prompt.text.toLowerCase() === text.toLowerCase())
-  )
-    throw new Error("You already have this prompt.");
-  const selectedCount = existing.filter((prompt) => prompt.selected).length;
-  return prisma.trackPrompt.create({
-    data: {
+  const taken = new Set(existing.map((prompt) => prompt.text.toLowerCase()));
+  let room =
+    TRACK.maxPrompts - existing.filter((prompt) => prompt.selected).length;
+  const rows = items.map((item) => {
+    const text = cleanPromptText(item.text);
+    if (text.length < 8)
+      throw new Error("Write a question of at least 8 characters.");
+    if (taken.has(text.toLowerCase()))
+      throw new Error(
+        items.length > 1
+          ? `You already have the prompt “${text}”.`
+          : "You already have this prompt.",
+      );
+    taken.add(text.toLowerCase());
+    const selected = room > 0;
+    if (selected) room -= 1;
+    const kind = Object.hasOwn(PROMPT_KINDS, item.kind ?? "") ? item.kind : "custom";
+    return {
       shop,
       text,
-      kind: "custom",
-      selected: selectedCount < TRACK.maxPrompts,
-    },
+      kind,
+      basis: kind === "custom" ? null : cleanPromptText(item.basis).slice(0, 120) || null,
+      selected,
+    };
   });
+  return prisma.$transaction(
+    rows.map((data) => prisma.trackPrompt.create({ data })),
+  );
+}
+
+export async function addPrompt(shop, input) {
+  const [prompt] = await addPrompts(shop, [{ text: input }]);
+  return prompt;
 }
 
 export async function updatePrompt(shop, id, input) {
@@ -426,28 +451,17 @@ async function suggestionSource(shop, row, store) {
 }
 
 /**
- * Writes a fresh set of prompts for the tracked domain with a connected AI
- * tool (the next one is tried if one fails), or without one from the catalog
- * (or the tracked website's menu). Prompts follow the tracked domain: the
- * store's catalog for its own domain, the website's home page for another
- * site. Replaces every suggested prompt, selected or not, and their answers.
- * The merchant's own prompts are kept. New prompts start unselected. If every
- * connected tool fails, nothing changes.
- * @returns {Promise<{ count: number, writtenBy: string | null, domains: string[], basedOn: "catalog" | "website", unread: string[] }>}
+ * Asks the connected AI tools, in order, to write prompts for the tracked
+ * domains (see suggestionSource) until one succeeds. Saves nothing.
+ * `tools` is how many were tried; `failures` says why each one failed.
  */
-export async function regeneratePrompts(shop) {
-  if (jobs.has(shop))
-    throw new Error("Wait for the current check to finish, then regenerate.");
+async function writeSuggestions(shop) {
   const row = await getStore(shop);
   const view = toStoreView(row);
   if (!view) throw new Error("Sync your store first.");
   // Brand questions ("Is X a good place to buy…?") use the name set in settings.
   const store = { ...view, name: brandName(view) };
-  const { domains, basedOn, sites, request, fallback } = await suggestionSource(
-    shop,
-    row,
-    store,
-  );
+  const source = await suggestionSource(shop, row, store);
 
   let suggestions = [];
   let writtenBy = null;
@@ -459,7 +473,7 @@ export async function regeneratePrompts(shop) {
       const result = await getAdapter(tool.provider).generateJson(
         tool.apiKey,
         tool.model,
-        request,
+        source.request,
       );
       suggestions = normalizeSuggestions(result);
       if (!suggestions.length)
@@ -475,12 +489,57 @@ export async function regeneratePrompts(shop) {
         await markToolError(shop, tool.provider, error.message);
     }
   }
+  return { ...source, suggestions, writtenBy, failures, tools: tools.length };
+}
+
+/**
+ * Prompts a connected AI tool writes for the tracked domains (the store's
+ * catalog, or the website set as the Store URL in settings) for the merchant
+ * to pick from. Nothing is saved; questions already tracked are left out.
+ * @returns {Promise<{ suggestions: Array<{ text: string, kind: string, basis: string | null }>, writtenBy: string, domains: string[], basedOn: "catalog" | "website", unread: string[] }>}
+ */
+export async function suggestPrompts(shop) {
+  const result = await writeSuggestions(shop);
+  if (!result.tools) throw new Error("Connect an AI tool to write prompts.");
+  if (!result.writtenBy)
+    throw new Error(`Couldn't write prompts. ${result.failures.join(" ")}`);
+  const existing = await prisma.trackPrompt.findMany({
+    where: { shop },
+    select: { text: true },
+  });
+  const taken = new Set(existing.map((prompt) => prompt.text.toLowerCase()));
+  return {
+    suggestions: result.suggestions.filter(
+      (item) => !taken.has(item.text.toLowerCase()),
+    ),
+    writtenBy: result.writtenBy,
+    domains: result.domains,
+    basedOn: result.basedOn,
+    unread: result.sites.filter((site) => !site.read).map((site) => site.domain),
+  };
+}
+
+/**
+ * Writes a fresh set of prompts for the tracked domain with a connected AI
+ * tool (the next one is tried if one fails), or without one from the catalog
+ * (or the tracked website's menu). Prompts follow the tracked domain: the
+ * store's catalog for its own domain, the website's home page for another
+ * site. Replaces every suggested prompt, selected or not, and their answers.
+ * The merchant's own prompts are kept. New prompts start unselected. If every
+ * connected tool fails, nothing changes.
+ * @returns {Promise<{ count: number, writtenBy: string | null, domains: string[], basedOn: "catalog" | "website", unread: string[] }>}
+ */
+export async function regeneratePrompts(shop) {
+  if (jobs.has(shop))
+    throw new Error("Wait for the current check to finish, then regenerate.");
+  const written = await writeSuggestions(shop);
+  const { domains, basedOn, sites, fallback, writtenBy, failures, tools } = written;
   // Keep the current prompts rather than swap them for catalog templates.
-  if (tools.length && !writtenBy)
+  if (tools && !writtenBy)
     throw new Error(
       `Couldn't write new prompts, so nothing was changed. ${failures.join(" ")}`,
     );
-  if (!tools.length) suggestions = fallback();
+  const suggestions = tools ? written.suggestions : fallback();
 
   const existing = await prisma.trackPrompt.findMany({ where: { shop } });
   const replacedIds = existing

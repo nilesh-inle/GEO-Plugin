@@ -496,6 +496,7 @@ export function buildPromptDetail({
 
 const MAX_SOURCES = 50;
 const MAX_SOURCE_URLS = 5;
+const MAX_BRAND_PAGES = 25;
 
 /** A link without its #fragment, so the same page counts once. */
 function pageUrl(url) {
@@ -508,10 +509,85 @@ function pageUrl(url) {
   }
 }
 
+const rivalKey = (name) => `rival:${name}`;
+
+/**
+ * One URL per page: no #fragment, utm_* parameters, "www." or trailing
+ * slash, so links to the same page from different answers add up.
+ */
+function canonicalPageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    for (const name of [...parsed.searchParams.keys()])
+      if (name.startsWith("utm_")) parsed.searchParams.delete(name);
+    parsed.hostname = parsed.hostname.replace(/^www\./, "");
+    if (parsed.pathname.length > 1) parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Records the pages of the store and of each competitor with a website that
+ * one answer links to. A page counts once per answer, at its first position
+ * among the answer's sources (1 = first). A Gemini link names only the site,
+ * so it's kept as one page with `url: null`.
+ * @param {Map} linked owner key → { answers, pages: Map<url, page> }
+ * @param {Array<{ key: string, domains: string[] }>} owners the store first
+ */
+function tallyLinkedPages(linked, owners, answer) {
+  const seen = new Set();
+  const owned = new Set();
+  (answer.sources ?? []).forEach((source, index) => {
+    const host = sourceHost(source);
+    const owner = host && owners.find((item) => matchesDomain(host, item.domains));
+    if (!owner) return;
+    const url = isGoogleRedirect(source.url) ? null : canonicalPageUrl(source.url);
+    const id = `${owner.key} ${url}`;
+    if (seen.has(id)) return;
+    seen.add(id);
+    owned.add(owner.key);
+    const pages = linked.get(owner.key).pages;
+    const page = pages.get(url) ?? { url, answers: 0, positions: 0, engines: new Set() };
+    page.answers += 1;
+    page.positions += index + 1;
+    page.engines.add(answer.provider);
+    pages.set(url, page);
+  });
+  for (const key of owned) linked.get(key).answers += 1;
+}
+
+/** An owner's linked pages for display, most linked first; a hidden page last. */
+function linkedPages(tally) {
+  if (!tally) return { linked: 0, pages: [] };
+  return {
+    linked: tally.answers,
+    pages: [...tally.pages.values()]
+      .map((page) => ({
+        url: page.url,
+        answers: page.answers,
+        position: Math.round((page.positions / page.answers) * 10) / 10,
+        engines: [...page.engines].sort(byToolOrder),
+      }))
+      .sort(
+        (a, b) =>
+          Number(a.url === null) - Number(b.url === null) ||
+          b.answers - a.answers ||
+          a.position - b.position ||
+          String(a.url).localeCompare(String(b.url)),
+      )
+      .slice(0, MAX_BRAND_PAGES),
+  };
+}
+
 /**
  * The three lists under the summary cards, for a set of answers:
  *   engines  per AI engine, the answers that named the store
- *   voices   the store and each watched competitor, by answers naming them
+ *   voices   the store and each watched competitor, by answers naming them,
+ *            each with the answers linking to its site (`linked`) and those
+ *            pages (`pages`: answers, average position, engines)
  *   sources  the sites the answers link to, by answers citing them, each
  *            with its most cited pages (Gemini hides the exact page)
  * @param {object} input
@@ -527,6 +603,17 @@ export function buildVisibilityBreakdown({ answers = [], domains = [], competito
   const rivals = new Map(
     competitors.filter((competitor) => competitor.name).map((competitor) => [competitor.name, 0]),
   );
+  const rivalDomain = (name) =>
+    competitors.find((competitor) => competitor.name === name)?.domain || null;
+  // Whose pages are tracked: the store (first, so it wins a shared domain)
+  // and each competitor with a website.
+  const owners = [
+    { key: "store", domains },
+    ...[...rivals.keys()]
+      .filter(rivalDomain)
+      .map((name) => ({ key: rivalKey(name), domains: [rivalDomain(name)] })),
+  ];
+  const linked = new Map(owners.map((owner) => [owner.key, { answers: 0, pages: new Map() }]));
   let named = 0;
 
   for (const answer of answers) {
@@ -544,6 +631,8 @@ export function buildVisibilityBreakdown({ answers = [], domains = [], competito
     );
     for (const name of rivals.keys())
       if (cited.has(name) || mentionsName(answer.text, name)) rivals.set(name, rivals.get(name) + 1);
+
+    tallyLinkedPages(linked, owners, answer);
 
     // Each site counts once per answer, however many of its pages are linked.
     const hosts = new Map();
@@ -575,10 +664,26 @@ export function buildVisibilityBreakdown({ answers = [], domains = [], competito
       .map((engine) => ({ ...engine, rate: rate(engine.mentioned, engine.answers) }))
       .sort((a, b) => b.mentioned - a.mentioned || b.answers - a.answers || byToolOrder(a.id, b.id)),
     voices: [
-      { key: "store", name: storeName || domains[0] || "Your store", you: true, answers: named },
-      ...[...rivals].map(([name, count]) => ({ key: `rival:${name}`, name, you: false, answers: count })),
+      {
+        key: "store",
+        name: storeName || domains[0] || "Your store",
+        domain: domains[0] ?? null,
+        you: true,
+        answers: named,
+      },
+      ...[...rivals].map(([name, count]) => ({
+        key: rivalKey(name),
+        name,
+        domain: rivalDomain(name),
+        you: false,
+        answers: count,
+      })),
     ]
-      .map((entry) => ({ ...entry, rate: rate(entry.answers, total) }))
+      .map((entry) => ({
+        ...entry,
+        rate: rate(entry.answers, total),
+        ...linkedPages(linked.get(entry.key)),
+      }))
       .sort((a, b) => b.answers - a.answers || Number(b.you) - Number(a.you) || a.name.localeCompare(b.name)),
     sources: [...sites.values()]
       .sort((a, b) => b.answers - a.answers || a.host.localeCompare(b.host))
